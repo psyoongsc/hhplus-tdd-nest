@@ -6,9 +6,17 @@ import { DatabaseModule } from "../database/database.module";
 describe("PointServiceIntegrationTest", () => {
   let pointService: PointService;
   let config: ConfigService;
+  let configServiceStub: Partial<ConfigService>;
   let chargeLimit: number;
 
   beforeEach(async () => {
+    configServiceStub = {
+      get: (key: string) => {
+        if (key === "CHARGE_LIMIT") return "1000";
+        return null;
+      },
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       imports: [
         DatabaseModule,
@@ -16,12 +24,15 @@ describe("PointServiceIntegrationTest", () => {
           envFilePath: `.env`,
         }),
       ],
-      providers: [PointService],
+      providers: [
+        PointService,
+        { provide: ConfigService, useValue: configServiceStub },
+      ],
     }).compile();
 
     pointService = module.get<PointService>(PointService);
     config = module.get<ConfigService>(ConfigService);
-    chargeLimit = Number(config.get<string>("CHARGE_LIMIT", "10000"));
+    chargeLimit = Number(config.get<string>("CHARGE_LIMIT", "1000"));
   });
 
   it("should be defined", () => {
@@ -88,76 +99,49 @@ describe("PointServiceIntegrationTest", () => {
        */
       describe("chargePoint", () => {
         /**
-         * 50포인트와 100포인트를 동시에 충전하면 150포인트가 되어야 함.
-         */
-        it("0포인트가 있는 사용자1이 50포인트 충전 요청과 100포인트 충전 요청을 동시에 보낼 경우 150포인트가 되어야 함✅", async () => {
-          await Promise.all([pointService.chargePoint(1, 100), pointService.chargePoint(1, 50)]);
-
-          const result = await pointService.getPoint(1);
-          expect(result.point).toBe(150);
-        });
-
-        /**
          * 최대 한도가 1000포인트라고 가정하고
-         * 100포인트와 901포인트를 동시에 충전하면 둘 중 하나는 실패해야 하며
-         * 충전 된 포인트는 100포인트 혹은 901포인트여야 함
+         * 500포인트 충전을 동시에 5번 하는 경우 3번은 실패하고
+         * 보유 포인트는 1000포인트 여야 함.
          */
-        it(`사용자1이 100포인트 충전 요청과 남은 한도 보다 많은 포인트 충전 요청을 동시에 보낼 경우 둘 중 하나의 요청은 실패❌`, async () => {
-          const [resultA, resultB] = await Promise.allSettled([
-            pointService.chargePoint(1, 100),
-            pointService.chargePoint(1, chargeLimit - 99),
-          ]);
+        it(`사용자1이 500포인트 충전을 동시에 5번 하는 경우 3번의 요청을 실패하고 1000포인트가 충전되어 있어야 함❌`, async () => {
+          const responseArray = await Promise.allSettled(
+            Array.from({ length: 5 }, (_, i) => pointService.chargePoint(1, 500))
+          );
 
-          const isAError = resultA.status === "rejected";
-          const isBError = resultB.status === "rejected";
+          const successCount = responseArray.filter((response) => response.status === "fulfilled").length;
+          const failCount = responseArray.filter((response) => response.status === "rejected").length;
 
-          expect(isAError || isBError).toBe(true);
-          expect(isAError && isBError).toBe(false);
+          expect(successCount).toBe(2);
+          expect(failCount).toBe(3);
 
           const result = await pointService.getPoint(1);
-          if (isAError) expect(result.point).toBe(chargeLimit - 99);
-          else expect(result.point).toBe(100);
+          expect(result.point).toBe(1000);
         });
       });
 
       describe("usePoint", () => {
         /**
-         * 100포인트가 있는 사용자가 50포인트를 동시에 2번 사용하면 0포인트가 되어야 함
+         * 1000포인트가 있는 사용자가
+         * 500포인트 사용을 동시에 5번 하는 경우 3번은 실패하고
+         * 보유 포인트는 0포인트가 되어야 함.
          */
-        it("100포인트가 있는 사용자1이 50포인트 사용 요청과 50포인트 사용 요청을 동시에 보낼 경우 0포인트가 되어야 함", async () => {
-          await pointService.chargePoint(1, 100);
+        it("1000포인트가 있는 사용자1이 500포인트 사용을 동시에 5번 하는 경우 3번의 요청을 실패하고 0포인트가 남아 있어야 함❌", async () => {
+          await pointService.chargePoint(1, 1000);
           const chargedPoint = (await pointService.getPoint(1)).point;
-          expect(chargedPoint).toBe(100);
+          expect(chargedPoint).toBe(1000);
 
-          await Promise.all([pointService.usePoint(1, 50), pointService.usePoint(1, 50)]);
+          const responseArray = await Promise.allSettled(
+            Array.from({ length: 5 }, (_, i) => pointService.usePoint(1, 500))
+          );
+
+          const successCount = responseArray.filter((response) => response.status === "fulfilled").length;
+          const failCount = responseArray.filter((response) => response.status === "rejected").length;
+
+          expect(successCount).toBe(2);
+          expect(failCount).toBe(3);
 
           const result = await pointService.getPoint(1);
           expect(result.point).toBe(0);
-        });
-
-        /**
-         * 100포인트가 있는 사용자가 50포인트, 51포인트 사용을 동시에 요청하면 둘 중 하나는 실패해야 하며
-         * 남은 포인트는 50포인트 혹은 49포인트여야 함
-         */
-        it("100포인트가 있는 사용자1이 50포인트 사용 요청과 51포인트 사용 요청을 동시에 보낼 경우 실패❌", async () => {
-          await pointService.chargePoint(1, 100);
-          const chargedPoint = (await pointService.getPoint(1)).point;
-          expect(chargedPoint).toBe(100);
-
-          const [resultA, resultB] = await Promise.allSettled([
-            pointService.usePoint(1, 50),
-            pointService.usePoint(1, 51),
-          ]);
-
-          const isAError = resultA.status === "rejected";
-          const isBError = resultB.status === "rejected";
-
-          expect(isAError || isBError).toBe(true);
-          expect(isAError && isBError).toBe(false);
-
-          const result = await pointService.getPoint(1);
-          if (isAError) expect(result.point).toBe(49);
-          else expect(result.point).toBe(50);
         });
       });
     });
